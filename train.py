@@ -1,69 +1,73 @@
-import argparse
-import collections
-import torch
 import wandb
+import torch
 import numpy as np
 import data_loader.data_loaders as module_data
-import model.loss as module_loss
-import model.metric as module_metric
-import model.model as module_arch
-from parse_config import ConfigParser
+import modules.loss as module_loss
+import modules.metric as module_metric
+import models.seq2seq as module_arch
+
+from utils.build_utils import build_logger, build_data_loader, build_model, build_optimizer
+from utils.configuration import Flags, Configuration
 from trainer import Trainer
 from utils import to_dict, flatten
 
 # fix random seeds for reproducibility
-SEED = 123
-torch.manual_seed(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+SEED = 1234
 np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 
-def main(config):
+def main(args):
+    print(args.config)
+
+    configuration = Configuration(args.config)
+    config = configuration.get_config()
 
     # WandB Resume Handling
     resume = False
-    if config.resume is not None:
+    if args.resume is not None:
         resume = True
 
-    if not config['debug']:
-        # Send Config to WandB
-        wandb.init(config=flatten(to_dict(config.config)), **flatten(config['wandb']), resume=resume)
+    base = config['base']
 
     # Logger
-    logger = config.get_logger('train')
+    logger = build_logger('train')
 
-    # setup data_loader instances
-    data_loader = config.init_obj('data_loader', module_data)
-    valid_data_loader = data_loader.split_validation()
-
-    # build model architecture, then print to console
-    model = config.init_obj('arch', module_arch)
+    # build_data_loader(config)
+    
+    model = build_model(config)
     logger.info(model)
 
+    # build_optimizer(config)
+
     # get function handles of loss and metrics
-    criterion = getattr(module_loss, config['loss'])
-    metrics = [getattr(module_metric, met) for met in config['metrics']]
+    criterion = getattr(module_loss, args['loss'])
+    metrics = [getattr(module_metric, met) for met in args['metrics']]
 
     # build optimizer, learning rate scheduler. delete every lines containing lr_scheduler for disabling scheduler
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
 
-    if 'module' not in config['optimizer']:
+    if 'module' not in args['optimizer']:
         module = torch.optim
     else:
-        module = config['optimizer']['module']
-    optimizer = config.init_obj('optimizer', module, trainable_params)
+        module = args['optimizer']['module']
+    optimizer = args.init_obj('optimizer', module, trainable_params)
 
 
-    lr_scheduler = config.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimizer)
+    lr_scheduler = args.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimizer)
 
-    if not config['debug']:
+    if not base['debug']:
+        # Send Config to WandB
+        wandb.init(config=flatten(to_dict(args.config)), **flatten(config['wandb']), resume=resume)
+
         # Send model to WandB
         wandb.watch(model)
 
     # Trainer
     trainer = Trainer(model, criterion, metrics, optimizer,
-                      config=config,
+                      config=args,
                       data_loader=data_loader,
                       valid_data_loader=valid_data_loader,
                       lr_scheduler=lr_scheduler)
@@ -72,19 +76,6 @@ def main(config):
 
 
 if __name__ == '__main__':
-    args = argparse.ArgumentParser(description='PyTorch Template')
-    args.add_argument('-c', '--config', default=None, type=str,
-                      help='config file path (default: None)')
-    args.add_argument('-r', '--resume', default=None, type=str,
-                      help='path to latest checkpoint (default: None)')
-    args.add_argument('-d', '--device', default=None, type=str,
-                      help='indices of GPUs to enable (default: all)')
-
-    # custom cli options to modify configuration from default values given in json file.
-    CustomArgs = collections.namedtuple('CustomArgs', 'flags type target')
-    options = [
-        CustomArgs(['--lr', '--learning_rate'], type=float, target='optimizer;args;lr'),
-        CustomArgs(['--bs', '--batch_size'], type=int, target='data_loader;args;batch_size'),
-    ]
-    config = ConfigParser.from_args(args, options)
-    main(config)
+    parser = Flags()
+    args = parser.get_parser().parse_args()
+    main(args)
